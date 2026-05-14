@@ -48,8 +48,9 @@ def hamming74_encode(bits):
     if not np.all((bits == 0) | (bits == 1)):
         raise ValueError('bits 只能包含 0 或 1')
 
-    # TODO: 将 bits reshape 为 (-1, 4)，再与 HAMMING_G 相乘并对 2 取模。
-    raise NotImplementedError('请实现 Hamming(7,4) 编码')
+    blocks = bits.reshape(-1, 4)
+    codewords = (blocks @ HAMMING_G) % 2
+    return codewords.reshape(-1)
 
 
 def hamming74_syndrome(codewords):
@@ -70,8 +71,8 @@ def hamming74_syndrome(codewords):
     if codewords.shape[1] != 7:
         raise ValueError('每个 Hamming(7,4) 码字长度必须为 7')
 
-    # TODO: 计算 s = r H^T mod 2。
-    raise NotImplementedError('请实现伴随式计算')
+    syndromes = (codewords @ HAMMING_H.T) % 2
+    return syndromes
 
 
 def hamming74_decode(received):
@@ -94,34 +95,149 @@ def hamming74_decode(received):
     if received.ndim != 1 or len(received) % 7 != 0:
         raise ValueError('received 必须是一维数组，长度为 7 的倍数')
 
-    # TODO: 使用 hamming74_syndrome 完成单比特纠错，并返回前 4 个信息位。
-    raise NotImplementedError('请实现 Hamming(7,4) 译码')
+    codewords = received.reshape(-1, 7).copy()
+    syndromes = hamming74_syndrome(codewords)
+
+    for i, syndrome in enumerate(syndromes):
+        if np.any(syndrome != 0):
+            for position in range(7):
+                if np.array_equal(syndrome, HAMMING_H[:, position]):
+                    codewords[i, position] ^= 1
+                    break
+
+    decoded_bits = codewords[:, :4]
+    return decoded_bits.reshape(-1)
+
+
+def _conv_next_state_and_output(state, input_bit):
+    """
+    (2,1,3) 卷积码状态转移和输出。
+    生成多项式：
+    g1 = 111
+    g2 = 101
+
+    state 用 2 bit 表示移位寄存器中的历史比特：
+    state = b1 b2
+    """
+    previous_1 = (state >> 1) & 1
+    previous_2 = state & 1
+
+    output_1 = input_bit ^ previous_1 ^ previous_2
+    output_2 = input_bit ^ previous_2
+
+    next_state = (input_bit << 1) | previous_1
+
+    return next_state, np.array([output_1, output_2], dtype=int)
 
 
 def convolutional_encode(bits):
     """
     选做：实现 (2,1,3) 卷积码编码，生成多项式为 g1=111, g2=101。
 
+    输入:
+        bits: 一维 0/1 信息比特数组
+
+    输出:
+        encoded_bits: 一维 0/1 编码比特数组
+
     默认在末尾添加 2 个 0 作为尾比特，使状态回到全零。
     """
     bits = np.asarray(bits, dtype=int)
+
+    if bits.ndim != 1:
+        raise ValueError('bits 必须是一维数组')
+
     if not np.all((bits == 0) | (bits == 1)):
         raise ValueError('bits 只能包含 0 或 1')
 
-    # TODO: 选做任务，可参考课件第6章卷积码部分。
-    raise NotImplementedError('选做：请实现卷积码编码')
+    state = 0
+    outputs = []
+
+    # 约束长度 K = 3，所以末尾补 2 个 0，让编码器回到全零状态
+    terminated_bits = np.concatenate([bits, np.zeros(2, dtype=int)])
+
+    for bit in terminated_bits:
+        state, output = _conv_next_state_and_output(state, int(bit))
+        outputs.extend(output)
+
+    return np.asarray(outputs, dtype=int)
 
 
 def viterbi_decode_hard(received_bits):
     """
     选做：实现 (2,1,3) 卷积码硬判决 Viterbi 译码。
+
+    输入:
+        received_bits: 一维 0/1 接收比特数组，长度必须为 2 的倍数
+
+    输出:
+        decoded_bits: 译码后的信息比特数组，不包含末尾 2 个尾比特
     """
     received_bits = np.asarray(received_bits, dtype=int)
+
+    if received_bits.ndim != 1:
+        raise ValueError('received_bits 必须是一维数组')
+
     if len(received_bits) % 2 != 0:
         raise ValueError('卷积码接收序列长度必须是 2 的倍数')
 
-    # TODO: 选做任务，可使用汉明距离作为路径度量。
-    raise NotImplementedError('选做：请实现 Viterbi 硬判决译码')
+    if not np.all((received_bits == 0) | (received_bits == 1)):
+        raise ValueError('received_bits 只能包含 0 或 1')
+
+    received_pairs = received_bits.reshape(-1, 2)
+    num_steps = len(received_pairs)
+    num_states = 4
+
+    # path_metrics[t, s] 表示第 t 步到达状态 s 的最小路径度量
+    path_metrics = np.full((num_steps + 1, num_states), np.inf)
+    predecessor_states = np.full((num_steps + 1, num_states), -1, dtype=int)
+    predecessor_bits = np.full((num_steps + 1, num_states), -1, dtype=int)
+
+    # 初始状态为 00
+    path_metrics[0, 0] = 0.0
+
+    for step, received_pair in enumerate(received_pairs, start=1):
+        for state in range(num_states):
+            if not np.isfinite(path_metrics[step - 1, state]):
+                continue
+
+            for input_bit in (0, 1):
+                next_state, expected_pair = _conv_next_state_and_output(
+                    state, input_bit
+                )
+
+                # 硬判决 Viterbi 使用汉明距离作为分支度量
+                branch_metric = np.count_nonzero(received_pair != expected_pair)
+                candidate_metric = path_metrics[step - 1, state] + branch_metric
+
+                if candidate_metric < path_metrics[step, next_state]:
+                    path_metrics[step, next_state] = candidate_metric
+                    predecessor_states[step, next_state] = state
+                    predecessor_bits[step, next_state] = input_bit
+
+    # 因为编码时补了 2 个 0，理论上最终状态应该回到 00
+    final_state = 0
+
+    # 保险处理：如果最终 00 状态不可达，就选度量最小的状态
+    if not np.isfinite(path_metrics[num_steps, final_state]):
+        final_state = int(np.argmin(path_metrics[num_steps]))
+
+    decoded_with_tail = []
+    state = final_state
+
+    for step in range(num_steps, 0, -1):
+        bit = predecessor_bits[step, state]
+        decoded_with_tail.append(bit)
+        state = predecessor_states[step, state]
+
+    decoded_with_tail.reverse()
+    decoded_with_tail = np.asarray(decoded_with_tail, dtype=int)
+
+    # 去掉编码时添加的 2 个尾比特
+    if len(decoded_with_tail) >= 2:
+        return decoded_with_tail[:-2]
+
+    return decoded_with_tail
 
 
 def run_coding_demo():
